@@ -3,9 +3,12 @@ import logging
 import pyodbc
 import sys
 import time
+
 from azure.servicebus import ServiceBusClient
 from azure.identity import DefaultAzureCredential
+
 from config import settings
+
 
 # Configure logging to output to stdout for kubectl logs
 logging.basicConfig(
@@ -16,16 +19,33 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+# Create credential once (reused everywhere)
+credential = DefaultAzureCredential()
+
+
 def get_sql_connection():
     """
-    Establishes connection to Azure SQL using Managed Identity.
-    The 'timeout' and 'UID' (Client ID) are critical here.
+    Establishes connection to Azure SQL using Managed Identity token.
+    This respects AZURE_CLIENT_ID automatically.
     """
     logger.info("Attempting to open SQL connection...")
+
     try:
-        conn = pyodbc.connect(settings.sql_connection_string, timeout=60)
+        token = credential.get_token("https://database.windows.net/.default")
+
+        # SQL expects UTF-16 encoded token
+        token_bytes = token.token.encode("utf-16-le")
+
+        conn = pyodbc.connect(
+            settings.sql_connection_string,
+            attrs_before={1256: token_bytes},
+            timeout=60
+        )
+
         logger.info("SQL Connection established successfully.")
         return conn
+
     except pyodbc.Error as e:
         logger.error(f"DATABASE CONNECTION ERROR: {e}")
         raise
@@ -36,6 +56,7 @@ def save_to_db(order):
     Inserts the parsed order into the SQL database.
     """
     conn = None
+
     try:
         order_id = order.get("orderId")
         customer_id = order.get("customerId")
@@ -57,11 +78,13 @@ def save_to_db(order):
         )
 
         conn.commit()
+
         logger.info(f"Successfully committed Order {order_id} to database.")
 
     except Exception as e:
         logger.error(f"Failed to save to DB: {str(e)}")
         raise
+
     finally:
         if conn:
             conn.close()
@@ -72,8 +95,9 @@ def process_order(message):
     """
     Parses the Service Bus message and triggers the DB save.
     """
+
     try:
-        # Correct message parsing
+        # Correct Service Bus body parsing
         body = b"".join(message.body).decode("utf-8")
 
         logger.info(f"Processing Raw Message: {body}")
@@ -86,8 +110,9 @@ def process_order(message):
         save_to_db(order)
 
     except json.JSONDecodeError:
-        logger.error(f"Invalid JSON format in message")
+        logger.error("Invalid JSON format in message")
         raise
+
     except Exception as e:
         logger.error(f"Processing logic failed: {e}")
         raise
@@ -97,13 +122,10 @@ def main():
     """
     Main loop that stays alive and listens to the Service Bus.
     """
+
     logger.info("Worker starting up...")
 
     try:
-        logger.info("Initializing Managed Identity credential...")
-
-        credential = DefaultAzureCredential()
-
         logger.info("Creating Service Bus client using Managed Identity...")
 
         client = ServiceBusClient(
@@ -112,15 +134,19 @@ def main():
         )
 
         with client:
+
             receiver = client.get_queue_receiver(
                 queue_name=settings.service_bus_queue_name
             )
 
-            logger.info(f"Worker is now listening on queue: {settings.service_bus_queue_name}")
+            logger.info(
+                f"Worker is now listening on queue: {settings.service_bus_queue_name}"
+            )
 
             with receiver:
 
                 for message in receiver:
+
                     try:
                         logger.info(f"Received message: {message.message_id}")
 
@@ -128,20 +154,26 @@ def main():
 
                         receiver.complete_message(message)
 
-                        logger.info(f"Message {message.message_id} completed.")
+                        logger.info(
+                            f"Message {message.message_id} completed."
+                        )
 
-                    except Exception as e:
+                    except Exception:
+
                         logger.error(
-                            f"Worker encountered an error processing message {message.message_id}. "
-                            f"Abandoning message for retry."
+                            f"Worker encountered an error processing message "
+                            f"{message.message_id}. Abandoning message for retry."
                         )
 
                         receiver.abandon_message(message)
 
+                        # prevent rapid crash loop
                         time.sleep(2)
 
     except Exception as e:
+
         logger.critical(f"FATAL ERROR: Worker process crashed: {e}")
+
         sys.exit(1)
 
 
