@@ -2,7 +2,7 @@
 FROM node:18-alpine AS build
 
 # Define the argument (defaults to localhost if not provided)
-ARG REACT_APP_API_URL=http://swiggy.alwayslearn.in
+ARG REACT_APP_API_URL=http://swiggy1.alwayslearn.in
 # Set it as an environment variable for the build process
 ENV REACT_APP_API_URL=$REACT_APP_API_URL
 
